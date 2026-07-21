@@ -131,3 +131,44 @@ def test_nan_row_is_retained_and_reported(
     assert pd.isna(result.loc[flagged_date, "close"])
     assert report.flagged_row_count == 1
     assert flagged_date in report.reasons["nan_ohlc"]
+
+def test_expected_sessions_never_includes_today_or_later(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, january_aapl: pd.DataFrame
+) -> None:
+    """A request whose range extends through "today" must never expect a
+    session for today or later, since today's bar may not exist yet or be
+    final. Requesting the same range twice in a row (simulating two runs on
+    the same day) must not produce a duplicate-timestamp error from trying
+    to re-fetch an always-missing "today" session."""
+    monkeypatch.chdir(tmp_path)
+    today = pd.Timestamp.now(tz="UTC").normalize()
+    yesterday = today - pd.Timedelta(days=1)
+
+    # Source data only goes up through yesterday -- nothing exists for
+    # "today", matching real yfinance behavior for an in-progress session.
+    source_dates = pd.bdate_range(yesterday - pd.Timedelta(days=10), yesterday, tz="UTC")
+    source = pd.DataFrame(
+        {
+            "Open": range(100, 100 + len(source_dates)),
+            "High": range(101, 101 + len(source_dates)),
+            "Low": range(99, 99 + len(source_dates)),
+            "Close": range(100, 100 + len(source_dates)),
+            "Volume": [1_000_000] * len(source_dates),
+        },
+        index=source_dates,
+    )
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(fetcher.yf, "download", _downloader_for(source, calls))
+
+    start = (yesterday - pd.Timedelta(days=10)).strftime("%Y-%m-%d")
+    end = today.strftime("%Y-%m-%d")
+
+    # First run: fetches and caches through yesterday.
+    first_result = fetcher.fetch_ohlcv("AAPL", start, end)
+    # Second run on the "same day": must not re-request a never-available
+    # "today" session, and must not raise a duplicate-timestamp error.
+    second_result = fetcher.fetch_ohlcv("AAPL", start, end)
+
+    assert len(second_result) == len(first_result)
+    assert not second_result.index.has_duplicates
+    assert today not in second_result.index

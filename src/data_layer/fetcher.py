@@ -276,16 +276,27 @@ def _missing_ranges(
 
 
 def _expected_sessions(start: pd.Timestamp, end: pd.Timestamp) -> pd.DatetimeIndex:
-    """Use the NYSE schedule when installed, with a standard-holiday fallback."""
+    """Use the NYSE schedule when installed, with a standard-holiday fallback.
+
+    Caps the effective end at yesterday (UTC), since the current day's bar
+    may not yet exist or be final in yfinance's data -- treating an
+    in-progress "today" as an expected, retryable session causes the same
+    calendar date to be re-fetched on every run, colliding with the already-
+    cached row for the prior confirmed day during merge.
+    """
+    today = pd.Timestamp.now(tz="UTC").normalize()
+    effective_end = min(end, today - pd.Timedelta(days=1))
+    if effective_end < start:
+        return pd.DatetimeIndex([], tz="UTC")
 
     try:
         import pandas_market_calendars as market_calendars
     except ImportError:
         business_day = CustomBusinessDay(calendar=_NYSEHolidayCalendar())
-        return pd.date_range(start.normalize(), end.normalize(), freq=business_day, tz="UTC")
+        return pd.date_range(start.normalize(), effective_end.normalize(), freq=business_day, tz="UTC")
 
     schedule = market_calendars.get_calendar("NYSE").schedule(
-        start_date=start.date(), end_date=end.date()
+        start_date=start.date(), end_date=effective_end.date()
     )
     return pd.DatetimeIndex(pd.to_datetime(schedule.index, utc=True)).normalize()
 
